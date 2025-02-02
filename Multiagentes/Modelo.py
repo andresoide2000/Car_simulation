@@ -3,8 +3,7 @@ import agentpy as ap
 import numpy as np
 import os
 # Visualization
-import matplotlib.pyplot as plt
-import IPython
+import heapq
 import time
 # ============== MANEJO DE COORDENADAS ==========================
 def add_dir(pos: tuple, dir: tuple, grid_shape: tuple) -> tuple:
@@ -15,6 +14,10 @@ def add_dir(pos: tuple, dir: tuple, grid_shape: tuple) -> tuple:
     else:
         return False
 
+#  Manhattan distance heuristic
+def heuristic(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+       
 
 
 Y = 0
@@ -83,34 +86,33 @@ def text_to_matrix(file_path, delimiter=None):
 
 class Obstacle(ap.Agent):
     def setup(self):
-        pass
+        self.weight = -1
 
 class Spawn(ap.Agent):
     def setup(self):
-        pass
+        self.weight = 0
 
 class Building(ap.Agent):
     def setup(self):
-        pass
+        self.weight = 0
 
 class Stoplight(ap.Agent):
     def setup(self):
         self.change_time = self.p.change_time
         self.state = True
         self.pos = None
-        self.cardinal = None
         self.myRoads = []
+        self.weight = 0
         
 
     def execute(self):
         print(self.myRoads)
         self.myRoads[0].stop = self.state
         self.myRoads[1].stop = not self.state
-        if self.change_time == 0:
-            self.change_time = self.p.change_time
         self.change_time -= 1
         if self.change_time == 0:
             self.state = not self.state
+            self.change_time = self.p.change_time
 
 
 class Road(ap.Agent):
@@ -118,12 +120,66 @@ class Road(ap.Agent):
         self.dir = None
         self.paso_peatonal = False
         self.stop = False
-        self.turn = None
+        self.weight = 10
+        self.flag = False
        
 
 class Peaton(ap.Agent):
     def setup(self):
-        self.goal = None
+
+        self.env = self.model.environment
+        self.route = []
+        self.next_step = 1
+        self.respect = 1 - 0.9*self.model.random.randint(0,1) #determina de forma  aleatoria si un peatón va a obedecer las leyes de tránsito o no
+
+    '''
+    Actual action execution. d
+    '''
+    def execute(self):
+        if self.next_step >= len(self.route):
+            self.env.remove_agents(self)
+            self.model.peatones.remove(self)
+        else:    
+            next_pos = self.route[self.next_step]
+            agents = [agent for agent in self.model.environment.agents[next_pos] if isinstance(agent, Peaton)]
+            if len(agents) != 0:
+                pos = self.get_position()
+                dir = (next_pos[0] - pos[0], next_pos[1] - pos[1])
+                if dir == DOWN:
+                    agents = [agent for agent in self.model.environment.get_agents_in_dir(self,[LEFT],Car)]
+                    agents.append(self.model.environment.get_agents_in_dir(self,[LEFT],Peaton))
+                    if len(agents) != 0:
+                        self.model.environment.move_by(self,UP)
+                        self.next_step -= 1
+                    else:
+                         self.model.environment.move_by(self,LEFT)
+                elif dir == RIGHT:
+                    agents = [agent for agent in self.model.environment.get_agents_in_dir(self,[DOWN],Car)]
+                    agents.append(self.model.environment.get_agents_in_dir(self,[DOWN],Peaton))
+                    if len(agents) != 0:
+                        self.model.environment.move_by(self,LEFT)
+                        self.next_step -= 1
+                    else:
+                         self.model.environment.move_by(self,DOWN)
+
+
+            else:
+                self.model.environment.move_to(self, next_pos)
+                self.next_step += 1
+                if self.next_step < len(self.route):
+                    curr_pos = self.route[self.next_step - 1]
+                    agents = [agent for agent in self.model.environment.agents[curr_pos] if isinstance(agent, Road)]
+                    if len(agents) != 0:
+                        agents[0].flag = False
+                    next_pos = self.route[self.next_step]
+                    agents = [agent for agent in self.model.environment.agents[next_pos] if isinstance(agent, Road)]
+                    if len(agents) != 0:
+                        agents[0].flag = True
+
+
+      
+    def get_position(self):
+        return self.env.positions[self]
 
 class Car(ap.Agent):
     def setup(self):
@@ -145,7 +201,7 @@ class Car(ap.Agent):
                         else:
                             for agent in self.model.environment.agents[next_pos]:
                                 if isinstance(agent, Road):
-                                    if agent.stop == False:
+                                    if agent.stop == False and agent.flag == False:
                                         return next_pos
                                     else:
                                         next_pos = None
@@ -162,7 +218,7 @@ class Car(ap.Agent):
                 else:
                     for agent in self.model.environment.agents[next_pos]:
                         if isinstance(agent, Road):
-                            if agent.stop == False:
+                            if agent.stop == False and agent.flag == False:
                                 return next_pos
                             else:
                                 next_pos = None
@@ -206,7 +262,7 @@ class City(ap.Grid):
 
     def get_agents_in_dir (self,p_agent,dirs:list, agent_class) -> list:
         """Obtiene los agentes en la dirección"""
-        agents = self.neighbors(p_agent,1)
+        agents = self.neighbors(p_agent,len(dirs))
         agents_in_dir = []
         pos = self.positions[p_agent]
         possible_dirs = [add_dir(pos, dir, self.shape) for dir in dirs]
@@ -238,11 +294,74 @@ class City(ap.Grid):
         else:
                 possible_moves = [car.dir]
                 return possible_moves
+    
+    
+    def weighted_a_star(self, start, goal, w):
+        """
+        Weighted A* search algorithm that finds the optimal path from start to goal.
+        - Takes into account the weight of agents in the environment.
+        - Uses a weight factor `w` to balance heuristic and actual cost.
 
-            
+        Parameters:
+        - start: Tuple (x, y) representing the starting position.
+        - goal: Tuple (x, y) representing the goal position.
+        - w: Weight factor for heuristic importance (default = 1.5).
         
+        Returns:
+        - List of tuples [(x1, y1), (x2, y2), ...] representing the path.
+        - Returns None if no valid path is found.
+        """
+
+        rows, cols = self.shape
+        open_set = []
+        heapq.heappush(open_set, (0, start))  # (total cost, position)
         
-        
+        came_from = {}  # To reconstruct the path
+        g_score = {start: 0}  # Cost from start to each node
+        f_score = {start: w * heuristic(start, goal)}  # Estimated total cost (weighted)
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+
+            if current == goal:
+                #  Reconstruct and return the path
+                path = []
+                while current in came_from:
+                    path.append(current)
+                    current = came_from[current]
+                path.append(start)
+                return path[::-1]  # Reverse path
+
+            for dx, dy in DIRS:
+                neighbor = (current[0] + dx, current[1] + dy)
+
+                #  Ensure the neighbor is within bounds
+                if not (0 <= neighbor[0] < rows and 0 <= neighbor[1] < cols):
+                    continue
+
+                #  Get the weight of the neighbor cell
+                weight = 0  # Default weight if no agent is present
+                agents = self.agents[neighbor]
+                for agent in agents:
+                    if hasattr(agent, "weight"):  # Ensure the agent has a weight attribute
+                        weight = agent.weight
+                        break  # Use the first valid weight found
+                
+                #  If weight is negative, the cell is impassable
+                if weight < 0:
+                    continue
+                weight = weight
+                #  Calculate new cost with weight adjustment
+                tentative_g_score = g_score[current] + weight
+
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + (w * heuristic(neighbor, goal))
+                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
+
+        return None  # No path found
+
 
 class Model(ap.Model):
     """Modelo que define el ambiente y los agentes."""
@@ -257,7 +376,7 @@ class Model(ap.Model):
         road_positions = []
         road_direction = []
         obstacle_positions = []
-        building_positions = []
+        self.building_positions = []
         stoplight_positions = []
         stoplight_state = []
         self.spawn_positions = []
@@ -267,7 +386,7 @@ class Model(ap.Model):
                     road_positions.append((row,col))
                     road_direction.append(self.city[row][col])
                 elif self.city[row][col] == "B":
-                    building_positions.append((row,col))
+                    self.building_positions.append((row,col))
                 elif self.city[row][col] == "S" or self.city[row][col] == "s":
                     stoplight_positions.append((row,col))
                     stoplight_state.append(self.city[row][col])
@@ -278,7 +397,7 @@ class Model(ap.Model):
         self.roads = ap.AgentList(self,len(road_positions),Road)
         self.obstacles = ap.AgentList(self,len(obstacle_positions),Obstacle)
         self.stoplights = ap.AgentList(self,len(stoplight_positions),Stoplight)
-        self.buildings = ap.AgentList(self,len(building_positions),Building)
+        self.buildings = ap.AgentList(self,len(self.building_positions),Building)
         self.spawns = ap.AgentList(self,len(self.spawn_positions),Spawn)
         for road,dir in zip(self.roads,road_direction):
             road.dir = dir
@@ -292,7 +411,7 @@ class Model(ap.Model):
         self.environment.add_agents(self.roads,road_positions)
         self.environment.add_agents(self.obstacles,obstacle_positions)
         self.environment.add_agents(self.stoplights,stoplight_positions)
-        self.environment.add_agents(self.buildings,building_positions)
+        self.environment.add_agents(self.buildings,self.building_positions)
         self.environment.add_agents(self.spawns,self.spawn_positions)
         car_list = []
         car_dir = []
@@ -319,44 +438,90 @@ class Model(ap.Model):
         self.car_dir = car_dir
         for car,dir in zip(self.cars,car_dir):
             car.dir = dict[dir]
-        self.environment.add_agents(self.cars,car_list) 
+        self.environment.add_agents(self.cars,car_list)
+        self.test = [] 
         for slight in self.stoplights:
             if slight.pos == "S":
-                slight.myRoads = self.environment.get_agents_in_dir(slight,[DOWN,LEFT],Road) 
+                slight.myRoads = self.environment.get_agents_in_dir(slight,[DOWN,LEFT],Road)
+                roads =  self.environment.get_agents_in_dir(slight,[DOWN,(2,0) ,LEFT, (0, -2)],Road)
+                for road in roads:
+                    road.paso_peatonal = True
+                    road.weight = 0
+                    if road.dir == "^" or road.dir == "v":
+                        ext = self.environment.get_agents_in_dir(road,[UP],Road)
+                        ext[0].paso_peatonal = True
+                    elif road.dir == "<" or road.dir == ">":
+                        ext = self.environment.get_agents_in_dir(road,[RIGHT],Road)
+                        ext[0].paso_peatonal = True
+                    
             else:
                 slight.myRoads = self.environment.get_agents_in_dir(slight,[UP,RIGHT],Road)
-        
+                roads =  self.environment.get_agents_in_dir(slight,[UP,(-2, 0) ,RIGHT, (0, 2)],Road)
+                for road in roads:
+                    road.paso_peatonal = True
+                    road.weight = 0
+                    if road.dir == "^" or road.dir == "v":
+                        ext = self.environment.get_agents_in_dir(road,[DOWN],Road)
+                        ext[0].paso_peatonal = True
+                    elif road.dir == "<" or road.dir == ">":
+                        ext = self.environment.get_agents_in_dir(road,[LEFT],Road)
+                        ext[0].paso_peatonal = True 
+        # Manejo de peatones
+        self.peatones = ap.AgentList(self,len(self.spawn_positions),Peaton)
+        self.environment.add_agents(self.peatones,self.spawn_positions)
+        for peaton in self.peatones:
+            peaton.route = self.environment.weighted_a_star(self.environment.positions[peaton],self.random.choice(self.building_positions), 15*peaton.respect)
+        #print(self.peaton.route)
+        #exit(0)
+
         
 
     
     def car_spawn(self):
-        if self.t != 0:    
-            if self.t % self.p.spawn == 0 or len(self.cars) == 0:
-                spawns = self.car_pos
+        spawns = self.car_pos
+        cars = []
+        for pos in spawns:
+            agents = self.environment.agents[pos]
+            for agent in agents:
+                if isinstance(agent, Car):
+                    cars.append(agent)
+        if self.t != 0 and len(cars) == 0:    
+            if self.t % self.p.car_spawn == 0 or len(self.cars) == 0:
                 new_car = ap.AgentList(self, len(spawns), Car)
                 for car,dir in zip(new_car,self.car_dir):
                     car.dir = dict[dir]
                 self.environment.add_agents(new_car,self.car_pos)
                 self.cars.extend(new_car)           
     
-    def spawn_peaton(self,spawn):
-        if self.t != 0:   
-            if self.t % self.p.spawn == 0 or len(self.peatones) == 0:
+    def spawn_peaton(self):
+        peatones = []
+        for pos in self.spawn_positions:
+            agents = self.environment.agents[pos]
+            for agent in agents:
+                if isinstance(agent, Peaton):
+                    peatones.append(agent)
+        if self.t != 0 and len(peatones) == 0:   
+            if self.t % self.p.p_spawn == 0 or len(self.peatones) == 0:
                 nuevos_peatones = ap.AgentList(self, len(self.spawn_positions), Peaton)
                 self.environment.add_agents(nuevos_peatones,self.spawn_positions)
+                for peaton in nuevos_peatones:
+                    peaton.route = self.environment.weighted_a_star(self.environment.positions[peaton],self.random.choice(self.building_positions), 15*peaton.respect)
                 self.peatones.extend(nuevos_peatones)   
 
-    # Manejo de peatones
-        self.peatones = ap.AgentList(self, len(self.spawn_positions), Peaton)
+    
     
     def step(self):
-         
         self.car_spawn()
+        self.spawn_peaton()
         for stop in self.stoplights:
             stop.execute()
         for car in self.cars:
             car.execute()
+        for peaton in self.peatones:
+            peaton.execute()
         self.print_grid()
+        if len(self.peatones) == 0:
+            self.stop()
   
     def print_grid(self):
         """Imprimir el estado del grid con sus agentes."""
@@ -368,7 +533,7 @@ class Model(ap.Model):
             for col in range(cols):
                 agents = self.environment.agents[(row, col)]
                 if agents:
-                    repr = '...'
+                    repr = '   '
                     for agent in agents:
                         if isinstance(agent, Car):
                             if agent.dir == RIGHT:
@@ -380,10 +545,21 @@ class Model(ap.Model):
                             elif agent.dir == DOWN:
                                 repr = "C ↓"
                             break
+                        elif isinstance(agent, Peaton):
+                            if agent.respect == 1:
+                                repr = " P "
+                            else:
+                                repr = " b "
+                            break
                         elif isinstance(agent, Road):
-                            repr = f" {agent.dir} "
+                            if agent.paso_peatonal == True and (agent.dir == "v" or agent.dir == "^"):
+                                repr = f" = "
+                            elif agent.paso_peatonal == True and (agent.dir == ">" or agent.dir == "<"):
+                                repr = f"| |"    
+                            else:
+                                repr = f" {agent.dir} "
                         elif isinstance(agent, Building):
-                            repr = " B "
+                            repr = "■■■"
                         elif isinstance(agent, Obstacle):
                             repr = " O "
                         elif isinstance(agent, Stoplight):
@@ -391,11 +567,9 @@ class Model(ap.Model):
                                 repr = " R "
                             else:
                                 repr = " V "
-                        elif isinstance(agent, Peaton):
-                            repr = " P "
                     row_repr.append(repr)
                 else:
-                    row_repr.append('...')
+                    row_repr.append('   ')
             grid_repr.append(" ".join(row_repr))
         print("\n")
         header = ['    ']
@@ -409,22 +583,16 @@ class Model(ap.Model):
 
 file_path = "mapa.txt"
 city = text_to_matrix(file_path)
+
 parameters = {
     'city': city,
-    'steps': 35,
-    'spawn': 8,
-    'change_time': 10
+    'car_spawn': 8,
+    'p_spawn': 10,
+    'change_time': 10,
+    'steps': 100
 }
 cityModel = Model(parameters)
 cityModel.run()
 
-"""
- neighbors = self.model.environment.neighbors(self,1)
-        if dir != "+":
-            for neighbor in neighbors:
-                if isinstance(neighbor,  Stoplight):
-                    self.paso_peatonal = True
-
-"""
 
 
