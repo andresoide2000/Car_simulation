@@ -2,7 +2,8 @@
 import agentpy as ap
 import numpy as np
 import os
-# Visualization
+import socket
+import json
 import heapq
 import time
 # ============== MANEJO DE COORDENADAS ==========================
@@ -98,6 +99,7 @@ class Building(ap.Agent):
 
 class Stoplight(ap.Agent):
     def setup(self):
+        self.id = None
         self.change_time = self.p.change_time
         self.state = True
         self.pos = None
@@ -126,7 +128,7 @@ class Road(ap.Agent):
 
 class Peaton(ap.Agent):
     def setup(self):
-
+        self.id = None
         self.env = self.model.environment
         self.route = []
         self.next_step = 1
@@ -183,6 +185,7 @@ class Peaton(ap.Agent):
 
 class Car(ap.Agent):
     def setup(self):
+        self.id = None
         self.dir = None
         self.prev_dir = None
     
@@ -372,6 +375,12 @@ class Model(ap.Model):
         self.city = self.p.city
         self.cols = len(self.city[0])
         self.rows = len(self.city)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(("127.0.0.1", 65432))
+        self.socket.listen(1)
+        print("Waiting for Unity connection...")
+        self.conn, self.addr = self.socket.accept()
+        print(f"Connected to {self.addr}")
         self.environment = City(self, shape=(self.cols,self.rows), track_empty=True)
         road_positions = []
         road_direction = []
@@ -436,8 +445,12 @@ class Model(ap.Model):
         self.cars = ap.AgentList(self,len(car_list),Car)
         self.car_pos = car_list
         self.car_dir = car_dir
+        self.car_ids = 0
         for car,dir in zip(self.cars,car_dir):
             car.dir = dict[dir]
+        for i,car in enumerate(self.cars):
+            car.id = f"C{i}"
+            self.car_ids += 1
         self.environment.add_agents(self.cars,car_list)
         self.test = [] 
         for slight in self.stoplights:
@@ -468,9 +481,20 @@ class Model(ap.Model):
                         ext[0].paso_peatonal = True 
         # Manejo de peatones
         self.peatones = ap.AgentList(self,len(self.spawn_positions),Peaton)
+        self.peaton_ids = 0
+        for i,peaton in enumerate(self.peatones):
+                    if peaton.respect == 1:
+                        peaton.id = f"P{i}"
+                    else:
+                        peaton.id = f"b{i}"
+                    self.peaton_ids += 1
         self.environment.add_agents(self.peatones,self.spawn_positions)
         for peaton in self.peatones:
             peaton.route = self.environment.weighted_a_star(self.environment.positions[peaton],self.random.choice(self.building_positions), 15*peaton.respect)
+        #self.peaton = Peaton(self)
+        #self.environment.add_agents([self.peaton],[self.random.choice(self.spawn_positions)])
+        #self.peaton.route = self.environment.weighted_a_star(self.environment.positions[self.peaton],self.random.choice(self.building_positions), 15*self.peaton.respect)
+        
         #print(self.peaton.route)
         #exit(0)
 
@@ -486,10 +510,14 @@ class Model(ap.Model):
                 if isinstance(agent, Car):
                     cars.append(agent)
         if self.t != 0 and len(cars) == 0:    
-            if self.t % self.p.car_spawn == 0 or len(self.cars) == 0:
+            if self.t % self.p.car_spawn == 0 or len(self.cars) == 0 and len(self.environment.agents) <= 20:
                 new_car = ap.AgentList(self, len(spawns), Car)
                 for car,dir in zip(new_car,self.car_dir):
                     car.dir = dict[dir]
+                static =  self.car_ids
+                for i,car in enumerate(new_car):
+                    car.id = f"C{i+static}"
+                    self.car_ids += 1
                 self.environment.add_agents(new_car,self.car_pos)
                 self.cars.extend(new_car)           
     
@@ -500,9 +528,13 @@ class Model(ap.Model):
             for agent in agents:
                 if isinstance(agent, Peaton):
                     peatones.append(agent)
-        if self.t != 0 and len(peatones) == 0:   
+        if self.t != 0 and len(peatones) == 0 and len(self.environment.agents) <= 20:   
             if self.t % self.p.p_spawn == 0 or len(self.peatones) == 0:
                 nuevos_peatones = ap.AgentList(self, len(self.spawn_positions), Peaton)
+                static = self.peaton_ids
+                for i,peaton in enumerate(nuevos_peatones):
+                    peaton.id = f"P{i+static}"
+                    self.peaton_ids += 1
                 self.environment.add_agents(nuevos_peatones,self.spawn_positions)
                 for peaton in nuevos_peatones:
                     peaton.route = self.environment.weighted_a_star(self.environment.positions[peaton],self.random.choice(self.building_positions), 15*peaton.respect)
@@ -517,15 +549,64 @@ class Model(ap.Model):
             stop.execute()
         for car in self.cars:
             car.execute()
+            print(f"Car: {car.id}")
         for peaton in self.peatones:
             peaton.execute()
+            print(f"Peaton: {peaton.id}")
+        log = {"agents":[]}
+        for peaton in self.peatones:
+            peaton_pos = self.environment.positions[peaton]
+            data = {"id": peaton.id ,"position" : {"x":peaton_pos[0],"y":0,"z":peaton_pos[1]}}
+            log["agents"].append(data)
+        static = 0
+        for car in self.cars:
+            car_pos = self.environment.positions[car]
+            data = {"id": car.id ,"position" : {"x":car_pos[0],"y":0,"z":car_pos[1]}}
+            log["agents"].append(data)
+        for stop in self.stoplights:
+            i = 0
+            for road in stop.myRoads:
+                road_pos = self.environment.positions[road]
+                x = road_pos[0]
+                z = road_pos[1]
+                print(f"Road: {i}  - Pos: {x},{z}")
+                i += 1
+        for stop in self.stoplights:
+            for road in stop.myRoads:
+                road_pos = self.environment.positions[road]
+                data = {"id": f"S{static}" ,"position" : {"x":road_pos[0],"y":0,"z":road_pos[1]}, "state": road.stop}
+                log["agents"].append(data)
+                static += 1
+        #print(log)
+        static = 0
+        #self.peaton.execute()
+        #peaton_pos = self.environment.positions[self.peaton]
+        #data = {"x":peaton_pos[0],"y":0,"z":peaton_pos[1]}
+        message = json.dumps(log)
+        try:
+            self.conn.sendall(message.encode("utf-8"))
+            print(f"mensaje enviado a unity -> {message}") 
+        except BrokenPipeError:
+            print("Connection lost.")
+            self.stop()
+        time.sleep(1)
         self.print_grid()
         if len(self.peatones) == 0:
             self.stop()
-  
+        #if self.peaton.next_step >= len(self.peaton.route):
+            #self.stop()
+
+
+    def end(self):
+        print("Closing connection...")
+        self.conn.close()
+        self.socket.close()
+        print("Connection closed.")
+    
+
     def print_grid(self):
         """Imprimir el estado del grid con sus agentes."""
-        os.system('cls')
+        #os.system('cls')
         grid_repr = []
         rows, cols = self.environment.shape
         for row in range(rows):
